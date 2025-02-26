@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { ethers } from 'ethers';
 import './App.css';
 import CoinFlip from './components/CoinFlip';
@@ -25,6 +25,60 @@ function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [txHistory, setTxHistory] = useState([]);
 
+  // Refresh balances - using useCallback to avoid recreating this function unnecessarily
+  const refreshBalances = useCallback(async () => {
+    if (!provider || !account || !contract) return;
+    
+    try {
+      const userBalance = await provider.getBalance(account);
+      setBalance(ethers.utils.formatEther(userBalance));
+      
+      try {
+        const contractBal = await contract.getContractBalance();
+        setContractBalance(ethers.utils.formatEther(contractBal));
+      } catch (contractError) {
+        console.error("Error getting contract balance:", contractError);
+        // Don't update state if there's an error
+      }
+    } catch (error) {
+      console.error("Error refreshing balances:", error);
+    }
+  }, [provider, account, contract]);
+
+  // Set up event listeners
+  const setupEventListeners = useCallback((provider) => {
+    if (!provider) return;
+    
+    const eventProvider = provider.provider || provider;
+    
+    // Listen for account changes
+    if (eventProvider.on) {
+      const handleAccountsChanged = (accounts) => {
+        if (accounts.length > 0) {
+          setAccount(accounts[0]);
+          refreshBalances();
+        } else {
+          setAccount('');
+        }
+      };
+      
+      const handleChainChanged = () => {
+        window.location.reload();
+      };
+      
+      eventProvider.on('accountsChanged', handleAccountsChanged);
+      eventProvider.on('chainChanged', handleChainChanged);
+      
+      // Return cleanup function
+      return () => {
+        if (eventProvider.removeListener) {
+          eventProvider.removeListener('accountsChanged', handleAccountsChanged);
+          eventProvider.removeListener('chainChanged', handleChainChanged);
+        }
+      };
+    }
+  }, [refreshBalances]);
+
   // Connect wallet
   const connectWallet = async (walletProvider) => {
     setIsLoading(true);
@@ -45,38 +99,11 @@ function App() {
       setWalletType(connection.walletType);
       setCommissionRate(connection.commissionRate);
       
-      // Set up event listeners
-      setupEventListeners(connection.provider);
-      
     } catch (error) {
       console.error("Connection error:", error);
       setError(error.message);
     } finally {
       setIsLoading(false);
-    }
-  };
-
-  // Set up event listeners
-  const setupEventListeners = (provider) => {
-    if (!provider) return;
-    
-    const eventProvider = provider.provider || provider;
-    
-    // Listen for account changes
-    if (eventProvider.on) {
-      eventProvider.on('accountsChanged', (accounts) => {
-        if (accounts.length > 0) {
-          setAccount(accounts[0]);
-          refreshBalances();
-        } else {
-          setAccount('');
-        }
-      });
-      
-      // Listen for chain changes
-      eventProvider.on('chainChanged', () => {
-        window.location.reload();
-      });
     }
   };
 
@@ -113,7 +140,7 @@ function App() {
       console.log("Transaction mined:", receipt);
       
       // Look for BetPlaced event
-      const betEvent = receipt.events.find(event => event.event === "BetPlaced");
+      const betEvent = receipt.events?.find(event => event.event === "BetPlaced");
       
       if (betEvent) {
         const [player, amount, outcome, won] = betEvent.args;
@@ -134,6 +161,10 @@ function App() {
           },
           ...prev.slice(0, 9) // Keep most recent 10
         ]);
+      } else {
+        console.warn("BetPlaced event not found in transaction receipt");
+        setCoinResult(guess ? "heads" : "tails");
+        setHasWon(false);
       }
       
       // Refresh balances
@@ -148,21 +179,6 @@ function App() {
       console.error("Error placing bet:", error);
       setError(error.message || "Transaction failed");
       setIsFlipping(false);
-    }
-  };
-
-  // Refresh balances
-  const refreshBalances = async () => {
-    if (!provider || !account || !contract) return;
-    
-    try {
-      const userBalance = await provider.getBalance(account);
-      const contractBal = await contract.getContractBalance();
-      
-      setBalance(ethers.utils.formatEther(userBalance));
-      setContractBalance(ethers.utils.formatEther(contractBal));
-    } catch (error) {
-      console.error("Error refreshing balances:", error);
     }
   };
 
@@ -183,6 +199,14 @@ function App() {
     return `${address.substring(0, 6)}...${address.substring(address.length - 4)}`;
   };
 
+  // Effect to set up event listeners when provider changes
+  useEffect(() => {
+    if (provider) {
+      const cleanup = setupEventListeners(provider);
+      return cleanup;
+    }
+  }, [provider, setupEventListeners]);
+
   // Effect to refresh balances periodically
   useEffect(() => {
     if (account && provider && contract) {
@@ -194,7 +218,7 @@ function App() {
       
       return () => clearInterval(interval);
     }
-  }, [provider, account, contract]);
+  }, [provider, account, contract, refreshBalances]);
 
   return (
     <div className="app">

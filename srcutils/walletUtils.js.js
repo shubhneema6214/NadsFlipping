@@ -8,50 +8,62 @@ const MONAD_TESTNET_RPC = 'https://testnet-rpc.monad.xyz';
 export const connectWalletAndContract = async (walletProvider, contractAddress, contractABI) => {
   let web3Provider;
   let walletType = '';
-
+  
   // Connect to different wallet types
   if (walletProvider === 'metamask') {
     if (!window.ethereum) throw new Error("MetaMask not found");
-    web3Provider = new ethers.providers.Web3Provider(window.ethereum);
+    web3Provider = window.ethereum;
     walletType = 'MetaMask';
   } else if (walletProvider === 'phantom') {
-    if (!window.solana || !window.solana.isPhantom) throw new Error("Phantom wallet not found");
-    await window.solana.connect();
-    web3Provider = new ethers.providers.JsonRpcProvider(MONAD_TESTNET_RPC); // Phantom uses Solana, not Ethereum
-    walletType = 'Phantom';
+    if (!window.solana) throw new Error("Phantom not found");
+    // Use solana provider
+    try {
+      const solProvider = window.solana;
+      await solProvider.connect();
+      // For Solana wallets in EVM mode, they often expose ethereum provider
+      web3Provider = window.ethereum; 
+      walletType = 'Phantom';
+    } catch (error) {
+      throw new Error("Failed to connect to Phantom wallet: " + error.message);
+    }
   } else if (walletProvider === 'rabby') {
+    // Detect Rabby wallet by checking user agent or wallet properties
     if (!window.ethereum) throw new Error("Rabby not found");
-    web3Provider = new ethers.providers.Web3Provider(window.ethereum);
+    web3Provider = window.ethereum;
     walletType = 'Rabby';
   } else if (walletProvider === 'backpack') {
-    if (!window.backpack) throw new Error("Backpack not found");
-    web3Provider = new ethers.providers.JsonRpcProvider(MONAD_TESTNET_RPC); // Adjusted for Backpack
+    // Detect Backpack wallet
+    if (!window.ethereum) throw new Error("Backpack not found");
+    web3Provider = window.ethereum;
     walletType = 'Backpack';
   } else {
     throw new Error("Unsupported wallet provider");
   }
 
   // Request account access
-  if (walletProvider !== 'phantom') {
-    await web3Provider.provider.request({ method: 'eth_requestAccounts' });
-  }
-
+  await web3Provider.request({ method: 'eth_requestAccounts' });
+  
   // Check if connected to Monad testnet
-  const chainId = await web3Provider.provider.request({ method: 'eth_chainId' });
-  if (chainId !== MONAD_TESTNET_CHAIN_ID && walletProvider !== 'phantom') {
+  const chainId = await web3Provider.request({ method: 'eth_chainId' });
+  if (chainId !== MONAD_TESTNET_CHAIN_ID) {
     try {
-      await web3Provider.provider.request({
+      await web3Provider.request({
         method: 'wallet_switchEthereumChain',
         params: [{ chainId: MONAD_TESTNET_CHAIN_ID }],
       });
     } catch (switchError) {
+      // This error code indicates that the chain has not been added to the user's wallet
       if (switchError.code === 4902) {
-        await web3Provider.provider.request({
+        await web3Provider.request({
           method: 'wallet_addEthereumChain',
           params: [{
             chainId: MONAD_TESTNET_CHAIN_ID,
             chainName: 'Monad Testnet',
-            nativeCurrency: { name: 'MON', symbol: 'MON', decimals: 18 },
+            nativeCurrency: {
+              name: 'MON',
+              symbol: 'MON',
+              decimals: 18
+            },
             rpcUrls: [MONAD_TESTNET_RPC],
             blockExplorerUrls: ['https://testnet.monadexplorer.com']
           }],
@@ -63,26 +75,39 @@ export const connectWalletAndContract = async (walletProvider, contractAddress, 
   }
 
   // Create ethers provider and signer
-  const signer = web3Provider.getSigner();
-  const account = walletProvider === 'phantom' ? window.solana.publicKey.toString() : await signer.getAddress();
-  const balance = await web3Provider.getBalance(account);
-
-  // Initialize contract with the signer (only if not using Phantom)
-  let contract, contractBalance, commissionRate;
-  if (walletProvider !== 'phantom') {
-    contract = new ethers.Contract(contractAddress, contractABI, signer);
+  const ethersProvider = new ethers.providers.Web3Provider(web3Provider);
+  const signer = ethersProvider.getSigner();
+  const account = await signer.getAddress();
+  const balance = await ethersProvider.getBalance(account);
+  
+  // Initialize contract with the signer
+  const contract = new ethers.Contract(contractAddress, contractABI, signer);
+  
+  // Get contract balance and commission rate with proper error handling
+  let contractBalance = ethers.BigNumber.from(0);
+  let commissionRate = 10; // Default to 10%
+  
+  try {
     contractBalance = await contract.getContractBalance();
-    commissionRate = await contract.commissionRate();
+  } catch (error) {
+    console.error("Error fetching contract balance:", error);
   }
-
+  
+  try {
+    commissionRate = await contract.commissionRate();
+    commissionRate = commissionRate.toNumber();
+  } catch (error) {
+    console.error("Error fetching commission rate:", error);
+  }
+  
   return {
-    provider: web3Provider,
+    provider: ethersProvider,
     signer,
     account,
     balance: ethers.utils.formatEther(balance),
-    contract: contract || null,
-    contractBalance: contract ? ethers.utils.formatEther(contractBalance) : null,
+    contract,
+    contractBalance: ethers.utils.formatEther(contractBalance),
     walletType,
-    commissionRate: commissionRate ? commissionRate.toNumber() : null
+    commissionRate
   };
 };
